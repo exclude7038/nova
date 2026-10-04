@@ -298,7 +298,7 @@ namespace nova::render::rhi {
 
         [[nodiscard]] nova::result<nova::ok> acquire_queues() {
             DEBUG_ASSERT(m_device != nullptr);
-            DEBUG_ASSERT(m_core.GetQueue() != nullptr);
+            DEBUG_ASSERT(m_core.GetQueue != nullptr);
 
             auto res = check(m_core.GetQueue(*m_device, nri::QueueType::GRAPHICS, 0, m_graphics_queue));
             if(!res) {
