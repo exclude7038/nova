@@ -45,7 +45,7 @@ std::unique_ptr<std::vector<std::uint8_t>> nova::ffi::dicom::dicom_api::read_fil
         throw std::runtime_error("Failed to read DICOM pixel data info");
     }
 
-    const auto pixel_view = m_reader->read_pixel_data_view(*pixel_info);
+    const auto pixel_view = m_reader->read_pixel_data(*pixel_info);
     if (!pixel_view) {
         throw std::runtime_error("Failed to read DICOM pixel data");
     }
