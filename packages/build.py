@@ -442,7 +442,6 @@ def read_dependencies(
 
     return requires
 
-
 def maybe_run_conan_fetch(
     config: Config,
 ) -> None:
@@ -453,14 +452,24 @@ def maybe_run_conan_fetch(
         "--build=missing",
         "-s",
         f"build_type={config.as_str}",
+
         "-o",
         "glfw/*:with_x11=False",
         "-o",
         "glfw/*:with_wayland=True",
+
         "-o",
         "xkbcommon/*:with_x11=False",
         "-o",
         "xkbcommon/*:with_wayland=True",
+
+        "-o",
+        "dcmtk/*:with_openssl=False",
+        "-o",
+        "dcmtk/*:with_libpng=False",
+        "-o",
+        "dcmtk/*:with_libtiff=False",
+
         "-g",
         "CMakeDeps",
         "-g",
