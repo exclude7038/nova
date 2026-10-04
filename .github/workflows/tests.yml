@@ -115,7 +115,9 @@ jobs:
               --release \
               --all \
               --fetch \
-              --tests
+              --tests \
+              --cpu-arch "$CPU_ARCH" \
+              --cpu-tune "$CPU_TUNE"
           fi
 
       - name: Publish test results
