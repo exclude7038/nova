@@ -33,7 +33,7 @@ on:
       conan_version:
         description: Conan version
         required: true
-        default: "2.32.0"
+        default: "2.33.0"
         type: string
 
       slang_version:
@@ -88,7 +88,7 @@ jobs:
           gcc_version: ${{ github.event.inputs.gcc_version || '16' }}
           cpp_standard: ${{ github.event.inputs.cpp_standard || '26' }}
           cmake_version: ${{ github.event.inputs.cmake_version || '4.4.3' }}
-          conan_version: ${{ github.event.inputs.conan_version || '2.32.0' }}
+          conan_version: ${{ github.event.inputs.conan_version || '2.33.0' }}
           slang_version: ${{ github.event.inputs.slang_version || '2026.19' }}
           slang_sha256: ${{ github.event.inputs.slang_sha256 || '5899bd40c3d1ee60eadd1d1b37acc4e88ae65cc25ac61651534d55b71a85fe75' }}
 

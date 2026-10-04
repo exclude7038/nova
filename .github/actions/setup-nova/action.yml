@@ -25,7 +25,7 @@ inputs:
   conan_version:
     description: Conan version
     required: false
-    default: "2.32.0"
+    default: "2.33.0"
 
   slang_version:
     description: Shader Slang version
