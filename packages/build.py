@@ -597,12 +597,19 @@ def build(
 def run_tests(
     cmake_build_dir: str,
 ) -> None:
+    junit_file = (
+        Path(cmake_build_dir)
+        / "ctest-results.xml"
+    )
+
     run_command(
         "ctest",
         [
             "--test-dir",
             cmake_build_dir,
             "--output-on-failure",
+            "--output-junit",
+            str(junit_file),
         ],
     )
 

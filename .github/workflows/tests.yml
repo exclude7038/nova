@@ -54,6 +54,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 concurrency:
   group: nova-tests-${{ github.ref }}
@@ -116,3 +117,22 @@ jobs:
               --fetch \
               --tests
           fi
+
+      - name: Publish test results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action/linux@v2
+        with:
+          check_name: CTest - ${{ matrix.config }}
+          files: packages/build/**/ctest-results.xml
+          comment_mode: off
+          job_summary: true
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-results-${{ matrix.config }}
+          path: |
+            packages/build/**/ctest-results.xml
+            packages/build/**/Testing/Temporary/LastTest.log
+            packages/build/**/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
