@@ -1,6 +1,42 @@
 name: Setup Nova
 description: Install Nova CI toolchain
 
+inputs:
+  llvm_version:
+    description: LLVM / Clang major version
+    required: false
+    default: "23"
+
+  gcc_version:
+    description: GCC / libstdc++ major version
+    required: false
+    default: "16"
+
+  cpp_standard:
+    description: C++ standard used by Conan
+    required: false
+    default: "26"
+
+  cmake_version:
+    description: CMake version
+    required: false
+    default: "4.4.3"
+
+  conan_version:
+    description: Conan version
+    required: false
+    default: "2.32.0"
+
+  slang_version:
+    description: Shader Slang version
+    required: false
+    default: "2026.19"
+
+  slang_sha256:
+    description: SHA256 of the Shader Slang Linux x86_64 archive
+    required: false
+    default: "5899bd40c3d1ee60eadd1d1b37acc4e88ae65cc25ac61651534d55b71a85fe75"
+
 runs:
   using: composite
 
@@ -28,42 +64,86 @@ runs:
           libgl1-mesa-dev \
           zstd
 
-    - name: Install LLVM 22
+    - name: Install GCC libstdc++
       shell: bash
+      env:
+        GCC_VERSION: ${{ inputs.gcc_version }}
       run: |
         set -euo pipefail
 
-        sudo install -d -m 0755 /etc/apt/keyrings
-
-        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
-          | gpg --dearmor \
-          | sudo tee /etc/apt/keyrings/llvm.gpg >/dev/null
-
-        echo \
-          "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
-          | sudo tee /etc/apt/sources.list.d/llvm-22.list
+        if [[ ! "$GCC_VERSION" =~ ^[0-9]+$ ]]; then
+          echo "error: invalid GCC version '$GCC_VERSION'" >&2
+          exit 1
+        fi
 
         sudo apt-get update
 
         sudo apt-get install -y \
-          clang-22 \
-          lld-22 \
-          llvm-22
+          "gcc-${GCC_VERSION}" \
+          "g++-${GCC_VERSION}" \
+          "libstdc++-${GCC_VERSION}-dev"
 
-        sudo ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld
-        sudo ln -sf /usr/bin/llvm-symbolizer-22 /usr/local/bin/llvm-symbolizer
-
-        echo "CC=/usr/bin/clang-22" >> "$GITHUB_ENV"
-        echo "CXX=/usr/bin/clang++-22" >> "$GITHUB_ENV"
-        echo "LLVM_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-22" >> "$GITHUB_ENV"
-
-    - name: Install Shader Slang
+    - name: Install LLVM
       shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm_version }}
       run: |
         set -euo pipefail
 
-        SLANG_VERSION="2026.19"
-        SLANG_SHA256="5899bd40c3d1ee60eadd1d1b37acc4e88ae65cc25ac61651534d55b71a85fe75"
+        if [[ ! "$LLVM_VERSION" =~ ^[0-9]+$ ]]; then
+          echo "error: invalid LLVM version '$LLVM_VERSION'" >&2
+          exit 1
+        fi
+
+        LLVM_INSTALLER="$RUNNER_TEMP/llvm.sh"
+
+        curl \
+          --fail \
+          --location \
+          --silent \
+          --show-error \
+          https://apt.llvm.org/llvm.sh \
+          --output "$LLVM_INSTALLER"
+
+        chmod +x "$LLVM_INSTALLER"
+
+        sudo "$LLVM_INSTALLER" "$LLVM_VERSION"
+
+        sudo apt-get install -y \
+          "clang-${LLVM_VERSION}" \
+          "lld-${LLVM_VERSION}" \
+          "llvm-${LLVM_VERSION}" \
+          "libclang-rt-${LLVM_VERSION}-dev"
+
+        sudo ln -sf \
+          "/usr/bin/ld.lld-${LLVM_VERSION}" \
+          /usr/local/bin/ld.lld
+
+        sudo ln -sf \
+          "/usr/bin/llvm-symbolizer-${LLVM_VERSION}" \
+          /usr/local/bin/llvm-symbolizer
+
+        echo "CC=/usr/bin/clang-${LLVM_VERSION}" >> "$GITHUB_ENV"
+        echo "CXX=/usr/bin/clang++-${LLVM_VERSION}" >> "$GITHUB_ENV"
+        echo "LLVM_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-${LLVM_VERSION}" >> "$GITHUB_ENV"
+
+    - name: Install Shader Slang
+      shell: bash
+      env:
+        SLANG_VERSION: ${{ inputs.slang_version }}
+        SLANG_SHA256: ${{ inputs.slang_sha256 }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! "$SLANG_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+          echo "error: invalid Shader Slang version '$SLANG_VERSION'" >&2
+          exit 1
+        fi
+
+        if [[ ! "$SLANG_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+          echo "error: invalid Shader Slang SHA256" >&2
+          exit 1
+        fi
 
         SLANG_ARCHIVE="$RUNNER_TEMP/slang.tar.gz"
         SLANG_ROOT="$RUNNER_TEMP/slang"
@@ -126,6 +206,9 @@ runs:
 
     - name: Install build tools
       shell: bash
+      env:
+        CMAKE_VERSION: ${{ inputs.cmake_version }}
+        CONAN_VERSION: ${{ inputs.conan_version }}
       run: |
         set -euo pipefail
 
@@ -137,28 +220,106 @@ runs:
 
         "$RUNNER_TEMP/nova-python/bin/python" \
           -m pip install \
-          "cmake==4.4.3" \
-          "conan==2.32.0"
+          "cmake==${CMAKE_VERSION}" \
+          "conan==${CONAN_VERSION}"
 
         echo "$RUNNER_TEMP/nova-python/bin" >> "$GITHUB_PATH"
 
     - name: Configure Conan
       shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm_version }}
+        CPP_STANDARD: ${{ inputs.cpp_standard }}
       run: |
         set -euo pipefail
 
-        CC=/usr/bin/clang-22 \
-        CXX=/usr/bin/clang++-22 \
-          conan profile detect --force
+        CONAN_HOME="$(conan config home)"
+
+        mkdir -p "$CONAN_HOME/profiles"
+
+        cat > "$CONAN_HOME/profiles/default" <<EOF
+        [settings]
+        arch=x86_64
+        build_type=Release
+        compiler=clang
+        compiler.cppstd=${CPP_STANDARD}
+        compiler.libcxx=libstdc++11
+        compiler.version=${LLVM_VERSION}
+        os=Linux
+
+        [conf]
+        tools.cmake.cmaketoolchain:generator=Ninja
+        tools.build:compiler_executables={"c": "/usr/bin/clang-${LLVM_VERSION}", "cpp": "/usr/bin/clang++-${LLVM_VERSION}"}
+
+        [buildenv]
+        CC=/usr/bin/clang-${LLVM_VERSION}
+        CXX=/usr/bin/clang++-${LLVM_VERSION}
+        EOF
+
+        echo "Nova Conan profile:"
+        cat "$CONAN_HOME/profiles/default"
 
     - name: Verify toolchain
       shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm_version }}
+        GCC_VERSION: ${{ inputs.gcc_version }}
+        CPP_STANDARD: ${{ inputs.cpp_standard }}
       run: |
         set -euo pipefail
 
-        clang-22 --version
-        clang++-22 --version
+        "/usr/bin/clang-${LLVM_VERSION}" --version
+        "/usr/bin/clang++-${LLVM_VERSION}" --version
+
+        "/usr/bin/gcc-${GCC_VERSION}" --version
+        "/usr/bin/g++-${GCC_VERSION}" --version
+
         cmake --version
         conan --version
         ninja --version
         slangc -version
+
+        echo
+        echo "Selected GCC installation:"
+
+        echo \
+          | "/usr/bin/clang++-${LLVM_VERSION}" \
+              -std="c++${CPP_STANDARD}" \
+              -stdlib=libstdc++ \
+              -E \
+              -v \
+              -x c++ \
+              - \
+              >/dev/null
+
+        echo
+        echo "libstdc++ version:"
+
+        echo '#include <bits/c++config.h>' \
+          | "/usr/bin/clang++-${LLVM_VERSION}" \
+              -std="c++${CPP_STANDARD}" \
+              -stdlib=libstdc++ \
+              -dM \
+              -E \
+              -x c++ \
+              - \
+          | grep -E '__GLIBCXX__|_GLIBCXX_RELEASE'
+
+        cat > "$RUNNER_TEMP/nova-toolchain-test.cpp" <<'EOF'
+        #include <type_traits>
+
+        static_assert(std::is_implicit_lifetime_v<int>);
+
+        int main()
+        {
+            return 0;
+        }
+        EOF
+
+        "/usr/bin/clang++-${LLVM_VERSION}" \
+          -std="c++${CPP_STANDARD}" \
+          -stdlib=libstdc++ \
+          "$RUNNER_TEMP/nova-toolchain-test.cpp" \
+          -o "$RUNNER_TEMP/nova-toolchain-test"
+
+        "$RUNNER_TEMP/nova-toolchain-test"

@@ -2,6 +2,51 @@ name: Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      llvm_version:
+        description: LLVM / Clang major version
+        required: true
+        default: "23"
+        type: string
+
+      gcc_version:
+        description: GCC / libstdc++ major version
+        required: true
+        default: "16"
+        type: string
+
+      cpp_standard:
+        description: C++ standard
+        required: true
+        default: "26"
+        type: choice
+        options:
+          - "26"
+          - "23"
+
+      cmake_version:
+        description: CMake version
+        required: true
+        default: "4.4.3"
+        type: string
+
+      conan_version:
+        description: Conan version
+        required: true
+        default: "2.32.0"
+        type: string
+
+      slang_version:
+        description: Shader Slang version
+        required: true
+        default: "2026.19"
+        type: string
+
+      slang_sha256:
+        description: Shader Slang archive SHA256
+        required: true
+        default: "5899bd40c3d1ee60eadd1d1b37acc4e88ae65cc25ac61651534d55b71a85fe75"
+        type: string
 
   schedule:
     - cron: "0 3 * * 6"
@@ -18,7 +63,7 @@ jobs:
   test:
     name: ${{ matrix.config }}
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     timeout-minutes: 60
 
@@ -38,6 +83,14 @@ jobs:
 
       - name: Setup Nova
         uses: ./.github/actions/setup-nova
+        with:
+          llvm_version: ${{ github.event.inputs.llvm_version || '23' }}
+          gcc_version: ${{ github.event.inputs.gcc_version || '16' }}
+          cpp_standard: ${{ github.event.inputs.cpp_standard || '26' }}
+          cmake_version: ${{ github.event.inputs.cmake_version || '4.4.3' }}
+          conan_version: ${{ github.event.inputs.conan_version || '2.32.0' }}
+          slang_version: ${{ github.event.inputs.slang_version || '2026.19' }}
+          slang_sha256: ${{ github.event.inputs.slang_sha256 || '5899bd40c3d1ee60eadd1d1b37acc4e88ae65cc25ac61651534d55b71a85fe75' }}
 
       - name: Build and test
         working-directory: packages
