@@ -57,11 +57,11 @@ target_compile_options(nova_project_options INTERFACE
   #-fsanitize=address
   -fno-omit-frame-pointer
 
+  -march=${NOVA_CPU_ARCH}
+  -mtune=${NOVA_CPU_TUNE}
   $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},x86_64>:-fcf-protection=full>
 
   $<$<CONFIG:Release>:-O3>
-  $<$<CONFIG:Release>:-march=${NOVA_CPU_ARCH}>
-  $<$<CONFIG:Release>:-mtune=${NOVA_CPU_TUNE}>
   $<$<CONFIG:Release>:-fdata-sections>
   $<$<CONFIG:Release>:-flto=thin>
   #$<$<CONFIG:Release>:-fsanitize=cfi>
@@ -74,8 +74,6 @@ target_compile_options(nova_project_options INTERFACE
 
   $<$<CONFIG:RelWithDebInfo>:-O3>
   $<$<CONFIG:RelWithDebInfo>:-g>
-  $<$<CONFIG:RelWithDebInfo>:-march=${NOVA_CPU_ARCH}>
-  $<$<CONFIG:RelWithDebInfo>:-mtune=${NOVA_CPU_TUNE}>
   $<$<CONFIG:RelWithDebInfo>:-flto=thin>
   $<$<CONFIG:RelWithDebInfo>:-fsanitize=cfi>
   $<$<CONFIG:RelWithDebInfo>:-fsanitize-trap=cfi>

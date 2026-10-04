@@ -95,6 +95,9 @@ jobs:
       - name: Build and test
         working-directory: packages
         shell: bash
+        env:
+          CPU_ARCH: ${{ github.event.inputs.cpu_arch || 'x86-64-v4' }}
+          CPU_TUNE: ${{ github.event.inputs.cpu_tune || 'generic' }}
         run: |
           set -euo pipefail
 
@@ -103,7 +106,9 @@ jobs:
               --debug \
               --all \
               --fetch \
-              --tests
+              --tests \
+              --cpu-arch "$CPU_ARCH" \
+              --cpu-tune "$CPU_TUNE"
           else
             python3 build.py \
               --release \
