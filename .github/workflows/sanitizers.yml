@@ -1,0 +1,166 @@
+name: Sanitizers
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_version:
+        description: LLVM / Clang major version
+        required: true
+        default: "23"
+        type: string
+
+      gcc_version:
+        description: GCC / libstdc++ major version
+        required: true
+        default: "16"
+        type: string
+
+      cpp_standard:
+        description: C++ standard
+        required: true
+        default: "26"
+        type: choice
+        options:
+          - "26"
+          - "23"
+
+      cmake_version:
+        description: CMake version
+        required: true
+        default: "4.4.3"
+        type: string
+
+      conan_version:
+        description: Conan version
+        required: true
+        default: "2.33.0"
+        type: string
+
+      slang_version:
+        description: Shader Slang version
+        required: true
+        default: "2026.19"
+        type: string
+
+      slang_sha256:
+        description: Shader Slang archive SHA256
+        required: true
+        default: "5899bd40c3d1ee60eadd1d1b37acc4e88ae65cc25ac61651534d55b71a85fe75"
+        type: string
+
+      cpu_arch:
+        description: CPU architecture passed to -march
+        required: true
+        default: "x86-64-v4"
+        type: string
+
+      cpu_tune:
+        description: CPU tuning target passed to -mtune
+        required: true
+        default: "generic"
+        type: string
+
+  schedule:
+    - cron: "0 4 * * 0"
+      timezone: Europe/Stockholm
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: nova-sanitizers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizer:
+    name: ${{ matrix.name }}
+
+    runs-on: ubuntu-26.04
+
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        include:
+          - sanitizer: asan-ubsan
+            name: ASan + UBSan
+
+          - sanitizer: tsan
+            name: TSan
+
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1:detect_stack_use_after_return=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1:history_size=7
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Cache Conan
+        uses: actions/cache@v6
+        with:
+          path: ~/.conan2
+          key: >-
+            conan-${{ runner.os }}-Debug-
+            conan${{ github.event.inputs.conan_version || '2.33.0' }}-
+            clang${{ github.event.inputs.llvm_version || '23' }}-
+            gcc${{ github.event.inputs.gcc_version || '16' }}-
+            cpp${{ github.event.inputs.cpp_standard || '26' }}-
+            ${{ hashFiles('packages/deps.toml', 'packages/build.py') }}
+          restore-keys: |
+            conan-${{ runner.os }}-Debug-conan${{ github.event.inputs.conan_version || '2.33.0' }}-
+
+      - name: Setup Nova
+        uses: ./.github/actions/setup-nova
+        with:
+          llvm_version: ${{ github.event.inputs.llvm_version || '23' }}
+          gcc_version: ${{ github.event.inputs.gcc_version || '16' }}
+          cpp_standard: ${{ github.event.inputs.cpp_standard || '26' }}
+          cmake_version: ${{ github.event.inputs.cmake_version || '4.4.3' }}
+          conan_version: ${{ github.event.inputs.conan_version || '2.33.0' }}
+          slang_version: ${{ github.event.inputs.slang_version || '2026.19' }}
+          slang_sha256: ${{ github.event.inputs.slang_sha256 || '5899bd40c3d1ee60eadd1d1b37acc4e88ae65cc25ac61651534d55b71a85fe75' }}
+
+      - name: Build and test
+        working-directory: packages
+        shell: bash
+        env:
+          CPU_ARCH: ${{ github.event.inputs.cpu_arch || 'x86-64-v4' }}
+          CPU_TUNE: ${{ github.event.inputs.cpu_tune || 'generic' }}
+        run: |
+          set -euo pipefail
+
+          python3 build.py \
+            --debug \
+            --all \
+            --fetch \
+            --tests \
+            --sanitizer "${{ matrix.sanitizer }}" \
+            --cpu-arch "$CPU_ARCH" \
+            --cpu-tune "$CPU_TUNE"
+
+      - name: Publish test results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action/linux@v2
+        with:
+          check_name: CTest - ${{ matrix.name }}
+          files: packages/build/**/ctest-results.xml
+          comment_mode: off
+          job_summary: true
+
+      - name: Upload sanitizer results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sanitizer-results-${{ matrix.sanitizer }}
+          path: |
+            packages/build/**/ctest-results.xml
+            packages/build/**/Testing/Temporary/LastTest.log
+            packages/build/**/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
