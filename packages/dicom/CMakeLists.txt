@@ -31,3 +31,7 @@ target_link_libraries(nova_dicom
 if(NOVA_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
+
+if(NOVA_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()

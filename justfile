@@ -205,3 +205,132 @@ rebuild config="release":
             ;;
     esac
 
+
+asan:
+    cd "{{packages}}" && \
+    ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=1:detect_stack_use_after_return=1" \
+    UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" \
+    python3 "{{build_tool}}" \
+        --debug \
+        --all \
+        --fetch \
+        --tests \
+        --sanitizer asan-ubsan \
+        --cpu-arch native \
+        --cpu-tune native
+
+tsan:
+    cd "{{packages}}" && \
+    TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1:history_size=7" \
+    python3 "{{build_tool}}" \
+        --debug \
+        --all \
+        --fetch \
+        --tests \
+        --sanitizer tsan \
+        --cpu-arch native \
+        --cpu-tune native
+
+
+# Build and run benchmarks.
+#
+# Examples:
+#   just bench dicom
+#   just bench dicom single_file
+#   just bench dicom single_file --full
+#
+# Environment overrides:
+#   NOVA_DICOM_BENCH_FILE=/path/to/image.dcm
+#   NOVA_BENCH_ITERATIONS=1000
+#
+# Benchmarks always use the Release configuration.
+bench *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    cd "{{packages}}"
+
+    package="${1:-dicom}"
+
+    if (($# > 0)); then
+        shift
+    fi
+
+    name="all"
+
+    if (($# > 0)) && [[ "$1" != -* ]]; then
+        name="$1"
+        shift
+    fi
+
+    case "$package" in
+        dicom)
+            ;;
+        *)
+            echo "error: unsupported benchmark package: '$package'" >&2
+            exit 2
+            ;;
+    esac
+
+    build_dir="build/Release/cmake"
+    bench_dir="$build_dir/benchmarks/$package"
+
+    if [[ ! -f "$build_dir/CMakeCache.txt" ]]; then
+        echo "error: Release build not configured. Run 'just build release fetch' first." >&2
+        exit 1
+    fi
+
+    cmake -S . -B "$build_dir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DNOVA_BUILD_BENCHMARKS=ON
+
+    if [[ "$name" == "all" ]]; then
+        target="nova_${package}_benchmark"
+    else
+        if [[ "$name" == nova_"${package}"_bench_* ]]; then
+            target="$name"
+        else
+            target="nova_${package}_bench_${name}"
+        fi
+
+        if [[ ! "$target" =~ ^nova_dicom_bench_[a-zA-Z0-9_]+$ ]]; then
+            echo "error: invalid benchmark name: '$name'" >&2
+            exit 2
+        fi
+    fi
+
+    cmake --build "$build_dir" --target "$target"
+
+    if [[ "$name" == "all" ]]; then
+        shopt -s nullglob
+        executables=("$bench_dir"/nova_"$package"_bench_*)
+    else
+        executables=("$bench_dir/$target")
+    fi
+
+    file="${NOVA_DICOM_BENCH_FILE:-dicom/tests/test_data/CTHead1.dcm}"
+    iterations="${NOVA_BENCH_ITERATIONS:-500}"
+
+    count=0
+
+    for executable in "${executables[@]}"; do
+        if [[ ! -f "$executable" || ! -x "$executable" ]]; then
+            continue
+        fi
+
+        echo
+        echo "=================================================="
+        echo "Benchmark: $(basename "$executable")"
+        echo "Configuration: Release"
+        echo "=================================================="
+
+        "$executable" "$file" "$iterations" "$@"
+
+        ((count+=1))
+    done
+
+    if ((count == 0)); then
+        echo "error: no benchmarks found for '$package/$name'" >&2
+        exit 1
+    fi
+

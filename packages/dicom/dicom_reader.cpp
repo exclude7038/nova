@@ -2,6 +2,7 @@
 #include "core/result.h"
 #include "dicom.h"
 #include <assert.hpp>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -10,7 +11,9 @@
 #include <dcmdata/dcfilefo.h>
 #include <dcmdata/dcitem.h>
 #include <dcmdata/dctagkey.h>
+#include <dcmdata/dcxfer.h>
 #include <exception>
+#include <fcntl.h>
 #include <filesystem>
 #include "logging/logger.h"
 #include <format>
@@ -21,11 +24,17 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <type_traits>
+#include <unistd.h>
 #include <utility>
 #include <vector>
+#include <dcmdata/dcistrmb.h>
+#include <dcmdata/dcelem.h>
+#include <dcmdata/dcstack.h>
 
 using namespace nova::dicom;
+namespace fs = std::filesystem;
 
 namespace {
     template<class T>
@@ -75,6 +84,92 @@ namespace {
 
     template<pixel_sample_format Format>
     using format_type_mapper_t = format_type_mapper<Format>::Type;
+
+    class file_descriptor final {
+    public:
+        explicit file_descriptor(const int fd) noexcept 
+            :
+            m_fd(fd)
+        {}
+
+        file_descriptor(const file_descriptor&) = delete;
+        file_descriptor& operator=(const file_descriptor&) = delete;
+        file_descriptor(file_descriptor&&) = delete;
+        file_descriptor& operator=(file_descriptor&&) = delete;
+
+        ~file_descriptor() noexcept {
+            if(m_fd >= 0) {
+                auto _ = ::close(m_fd);
+            }
+        }
+
+        [[nodiscard]] int native_handle() const noexcept {
+            return m_fd;
+        }
+    private:
+        int m_fd{-1};
+    };
+
+    struct input_buffer final {
+        std::unique_ptr<std::byte[]> data;
+        std::size_t size{};
+    };
+
+    [[nodiscard]] nova::result<input_buffer> read_file(const fs::path& path) {
+        constexpr std::size_t max_file_size = 256ull * 1024ull * 1024ull;
+
+        const file_descriptor file{::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
+
+        if(file.native_handle() < 0) [[unlikely]] {
+            return nova::err(std::format("Failed to open DICOM: errno={}", errno));
+        }
+
+        struct stat info{};
+
+        if(::fstat(file.native_handle(), &info) != 0) [[unlikely]] {
+            return nova::err(std::format("Failed to stat DICOM: errno={}", errno));
+        }
+
+        if(!S_ISREG(info.st_mode)) [[unlikely]] {
+            return nova::err(std::string{"DICOM input is not a regular file"});
+        }
+
+        if(info.st_size <= 0 ||
+            static_cast<std::uintmax_t>(info.st_size) > max_file_size) [[unlikely]] {
+            return nova::err(std::string{"DICOM input exceeds the configured size limit"});
+        }
+
+        const auto size = static_cast<std::size_t>(info.st_size);
+
+        if((size & 1U) != 0) [[unlikely]] {
+            return nova::err(std::string{"DICOM input length must be even"});
+        }
+
+        auto data = std::make_unique_for_overwrite<std::byte[]>(size);
+        std::size_t offset = 0;
+
+        while(offset < size) {
+            const auto bytes = ::read(file.native_handle(), data.get() + offset, size - offset);
+
+            if(bytes < 0) [[unlikely]] {
+                if(errno == EINTR) {
+                    continue;
+                }
+                return nova::err(std::format("DICOM read failed: errno={}", errno));
+            }
+
+            if(bytes == 0) [[unlikely]] {
+                return nova::err(std::string{"Unexpected end of DICOM file"});
+            }
+
+            offset += static_cast<std::size_t>(bytes);
+        }
+
+        return input_buffer {
+            .data = std::move(data),
+            .size = size
+        };
+    }
 };
 
 class dicom_reader::impl final {
@@ -82,21 +177,39 @@ public:
     [[nodiscard]] nova::result<nova::ok> load(const std::filesystem::path& path) noexcept {
         try {
             clear();
-            auto file = std::make_unique<DcmFileFormat>();
 
-            const auto path_string = path.string();
-            const auto status = file->loadFile(path_string.c_str());
-            if(status.bad()) {
-                return nova::err(std::string(status.text()));
+            auto buffer = read_file(path);
+            if(!buffer) [[unlikely]] {
+                return nova::err(std::move(buffer.error()));
             }
 
-            m_file = std::move(file);
+            auto file = std::make_unique<DcmFileFormat>();
+            DcmInputBufferStream stream;
+            stream.setBuffer(buffer->data.get(), static_cast<offile_off_t>(buffer->size));
+            stream.setEos();
+
+            if(stream.status().bad()) [[unlikely]] {
+                return nova::err(std::string{stream.status().text()});
+            }
+
+            file->transferInit();
+            const auto status = file->read(stream, EXS_Unknown, EGL_noChange, static_cast<Uint32>(buffer->size));
+            file->transferEnd();
+
+            if(status.bad()) [[unlikely]] {
+                return nova::err(std::string{status.text()});
+            }
+
             m_file_path = path;
+            m_file = std::move(file);
 
             return nova::ok{};
         }
         catch(const std::exception& e) {
             return nova::err(e.what());
+        }
+        catch(...) {
+           return nova::err(std::string{"Unknown DICOM loading failure"});
         }
     }
 
@@ -111,53 +224,152 @@ public:
             return nova::err();
         }
 
-        return metadata {
-            .patient{
-                .name = read_tag(dicom_tag::patient_name),
-                .id = read_tag(dicom_tag::patient_id),
-                .birth_date = read_tag(dicom_tag::patient_birth_date),
-                .birth_time = read_tag(dicom_tag::patient_birth_time),
-                .sex = read_tag(dicom_tag::patient_sex),
-            },
-            .study {
-                .instance_uid = read_tag(dicom_tag::study_instance_uid),
-                .id = read_tag(dicom_tag::study_id),
-                .date = read_tag(dicom_tag::study_date),
-                .time = read_tag(dicom_tag::study_time),
-                .accession_number = read_tag(dicom_tag::study_accession_number),
-                .description = read_tag(dicom_tag::study_description),
-                .referring_physician_name = read_tag(dicom_tag::study_referring_physician_name)
-            },
-            .series {
-                .instance_uid = read_tag(dicom_tag::series_instance_uid),
-                .date = read_tag(dicom_tag::series_date),
-                .time = read_tag(dicom_tag::series_time),
-                .description = read_tag(dicom_tag::series_description),
-                .number = read_tag(dicom_tag::series_number),
-                .body_part_examined = read_tag(dicom_tag::series_body_part_examined),
-                .performing_physician_name = read_tag(dicom_tag::series_performing_physician_name),
-                .smallest_pixel_value = read_tag(dicom_tag::series_smallest_pixel_value),
-                .largest_pixel_value = read_tag(dicom_tag::series_largest_pixel_value),
-                .modality = [this] -> modality {
-                    const auto result = resolve_modality(read_tag(dicom_tag::series_modality));
-                    if(result) {
-                        return *result;
-                    }
-                    logger::error("Failed to read dicom modality: {}", result.error());
-                    return modality::Unknown;
-                }()
+        metadata result{};
+
+        const auto assign_str = [](DcmElement& elem, std::string& target) {
+            char* value = nullptr;
+
+            if(elem.getString(value).good() && value != nullptr) {
+                target.assign(value);
             }
         };
+
+        const auto assign_numeric_str = [](DcmElement& elem, std::string& target) {
+            OFString value;
+
+            if(elem.getOFString(value, 0).good()) {
+                target.assign(value.data(), value.size());
+            }
+        };
+
+        auto* dataset = this->dataset();
+        for(auto* obj = dataset->nextInContainer(nullptr); obj != nullptr; obj = dataset->nextInContainer(obj)) {
+            if(!obj->isElement()) {
+                continue;
+            }
+
+            auto& elem = *static_cast<DcmElement*>(obj);
+            const auto& tag = elem.getTag();
+            const auto key = (static_cast<std::uint32_t>(tag.getGroup()) << 16) | 
+                             static_cast<std::uint32_t>(tag.getElement());
+
+             switch(key) {
+                // Patient
+                case 0x00100010:
+                    assign_str(elem, result.patient.name);
+                    break;
+                case 0x00100020:
+                    assign_str(elem, result.patient.id);
+                    break;
+
+                case 0x00100030:
+                    assign_str(elem, result.patient.birth_date);
+                    break;
+
+                case 0x00100032:
+                    assign_str(elem, result.patient.birth_time);
+                    break;
+
+                case 0x00100040:
+                    assign_str(elem, result.patient.sex);
+                    break;
+
+                // Study
+                case 0x0020000D:
+                    assign_str(elem, result.study.instance_uid);
+                    break;
+
+                case 0x00200010:
+                    assign_str(elem, result.study.id);
+                    break;
+
+                case 0x00080020:
+                    assign_str(elem, result.study.date);
+                    break;
+
+                case 0x00080030:
+                    assign_str(elem, result.study.time);
+                    break;
+
+                case 0x00080050:
+                    assign_str(elem, result.study.accession_number);
+                    break;
+
+                case 0x00081030:
+                    assign_str(elem, result.study.description);
+                    break;
+
+                case 0x00080090:
+                    assign_str(elem, result.study.referring_physician_name);
+                    break;
+
+                // Series
+                case 0x0020000E:
+                    assign_str(elem, result.series.instance_uid);
+                    break;
+
+                case 0x00080021:
+                    assign_str(elem, result.series.date);
+                    break;
+
+                case 0x00080031:
+                    assign_str(elem, result.series.time);
+                    break;
+
+                case 0x0008103E:
+                    assign_str(elem, result.series.description);
+                    break;
+
+                case 0x00200011:
+                    assign_str(elem, result.series.number);
+                    break;
+
+                case 0x00180015:
+                    assign_str(elem, result.series.body_part_examined);
+                    break;
+
+                case 0x00081050:
+                    assign_str(elem, result.series.performing_physician_name);
+                    break;
+
+                case 0x00280108:
+                    assign_numeric_str(elem, result.series.smallest_pixel_value);
+                    break;
+
+                case 0x00280109:
+                    assign_numeric_str(elem, result.series.largest_pixel_value);
+                    break;
+
+                case 0x00080060: {
+                    char* value = nullptr;
+
+                    if(elem.getString(value).good() && value != nullptr) {
+                        const auto resolved = resolve_modality(std::string_view{value});
+
+                        if(resolved) {
+                            result.series.modality = *resolved;
+                        }
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+        return result;
     }
 
     template<pixel_sample_format sampleFormat>
-    [[nodiscard]] nova::result<std::span<const std::byte>> read_pixel_data(std::size_t expected_sample_count) const noexcept {
+    [[nodiscard]] nova::result<std::span<const std::byte>> read_pixel_data(
+        std::size_t expected_sample_count
+    ) const noexcept {
         auto* dataset = this->dataset();
         DEBUG_ASSERT(dataset != nullptr);
 
         using T = ::format_type_mapper_t<sampleFormat>;
 
-        const auto read_array = [&]<class U>(pixel_reader_fnc_ptr<U> reader) noexcept -> nova::result<std::span<const std::byte>> {
+        const auto read_array = [&]<class U>(pixel_reader_fnc_ptr<U> reader) noexcept 
+            -> nova::result<std::span<const std::byte>> {
             DEBUG_ASSERT(reader != nullptr);
 
             const U* src = nullptr;
@@ -228,41 +440,202 @@ public:
         }
     }
 
-    [[nodiscard]] nova::result<pixel_data_info> read_pixel_data_info() const noexcept {
+    
+    [[nodiscard]] nova::result<pixel_data_info> read_pixel_data_info() const {
         if(!is_loaded()) [[unlikely]] {
-            logger::error("unable to read pixeldata info. Reason: no dicom file loaded");
-            return nova::err();
+            return nova::err(std::string{"No DICOM file loaded"});
         }
 
-        auto photometric = resolve_photometric(read_tag(dicom_tag::photometric_interpretation));
-        if(!photometric) {
-            logger::error("{}", photometric.error());
-            return nova::err();
-        }
+        pixel_data_info info{};
+        info.dims.frames = 1;
 
-        const auto pixel_representation = read_tag<uint16_t>(dicom_tag::pixel_representation);
-        const auto bits_allocated = read_tag<uint16_t>(dicom_tag::bits_allocated);
+        std::uint16_t pixel_representation{};
+        std::string_view photometric_value{};
 
-        const auto format = resolve_pixel_sample_format(bits_allocated, pixel_representation);
-        if(!format) {
-            logger::error("{}", format.error());
-            return nova::err();
-        }
+        bool has_rows = false;
+        bool has_columns = false;
+        bool has_samples = false;
+        bool has_bits = false;
+        bool has_representation = false;
+        bool has_photometric = false;
 
-        pixel_data_info info {
-            .dims = image_dimensions {
-                .width = read_tag<uint16_t>(dicom_tag::columns),
-                .height = read_tag<uint16_t>(dicom_tag::rows),
-                .frames = read_tag<uint16_t>(dicom_tag::number_of_frames, 1)
-            },
-            .samples_per_pixel = read_tag<uint16_t>(dicom_tag::samples_per_pixel),
-            .planar_configuration = read_tag<uint16_t>(dicom_tag::planar_configuration),
-            .bits_allocated = bits_allocated,
-            .bits_stored = read_tag<uint16_t>(dicom_tag::bits_stored),
-            .high_bit = read_tag<uint16_t>(dicom_tag::high_bit),
-            .photometric = *photometric,
-            .format = *format
+        const auto get_uint16 = [](DcmElement& element, std::uint16_t& value) noexcept {
+            return element.getUint16(value).good();
         };
+
+        const auto get_string = [](DcmElement& element, std::string_view& value) noexcept {
+            char* data = nullptr;
+            Uint32 length = 0;
+
+            if(element.getString(data, length).bad() || data == nullptr) {
+                return false;
+            }
+
+            value = std::string_view{data, length};
+
+            while(!value.empty() && (value.front() == ' ' || value.front() == '\0')) {
+                value.remove_prefix(1);
+            }
+
+            while(!value.empty() && (value.back() == ' ' || value.back() == '\0')) {
+                value.remove_suffix(1);
+            }
+
+            return !value.empty();
+        };
+
+        const auto get_frames = [&](DcmElement& element, std::uint32_t& frames) noexcept {
+            std::string_view value;
+
+            if(!get_string(element, value)) {
+                return false;
+            }
+
+            if(value.starts_with('+')) {
+                value.remove_prefix(1);
+            }
+
+            const auto [ptr, error] = std::from_chars(
+                value.data(),
+                value.data() + value.size(),
+                frames
+            );
+
+            return error == std::errc{} && ptr == value.data() + value.size() && frames > 0;
+        };
+
+        auto* dataset = this->dataset();
+
+        for(auto* obj = dataset->nextInContainer(nullptr); obj != nullptr; obj = dataset->nextInContainer(obj)) {
+            if(!obj->isElement()) {
+                continue;
+            }
+
+            auto& element = *static_cast<DcmElement*>(obj);
+            const auto& tag = element.getTag();
+
+            const auto key =
+                (static_cast<std::uint32_t>(tag.getGroup()) << 16) |
+                static_cast<std::uint32_t>(tag.getElement());
+
+            switch(key) {
+                case 0x00280002:
+                    has_samples = get_uint16(element, info.samples_per_pixel);
+                    break;
+
+                case 0x00280004:
+                    has_photometric = get_string(element, photometric_value);
+                    break;
+
+                case 0x00280006:
+                    if(!get_uint16(element, info.planar_configuration)) {
+                        return nova::err(std::string{"Invalid PlanarConfiguration"});
+                    }
+                    break;
+
+                case 0x00280008:
+                    if(!get_frames(element, info.dims.frames)) {
+                        return nova::err(std::string{"Invalid NumberOfFrames"});
+                    }
+                    break;
+
+                case 0x00280010: {
+                    std::uint16_t value{};
+                    has_rows = get_uint16(element, value);
+                    info.dims.height = value;
+                    break;
+                }
+
+                case 0x00280011: {
+                    std::uint16_t value{};
+                    has_columns = get_uint16(element, value);
+                    info.dims.width = value;
+                    break;
+                }
+
+                case 0x00280100:
+                    has_bits = get_uint16(element, info.bits_allocated);
+                    break;
+
+                case 0x00280101:
+                    if(!get_uint16(element, info.bits_stored)) {
+                        return nova::err(std::string{"Invalid BitsStored"});
+                    }
+                    break;
+
+                case 0x00280102:
+                    if(!get_uint16(element, info.high_bit)) {
+                        return nova::err(std::string{"Invalid HighBit"});
+                    }
+                    break;
+
+                case 0x00280103:
+                    has_representation = get_uint16(element, pixel_representation);
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        if(!has_rows || !has_columns || !has_samples || !has_bits || !has_representation || !has_photometric) {
+            return nova::err(std::string{"Missing required DICOM image attributes"});
+        }
+
+        if(info.dims.width == 0 || info.dims.height == 0 ||
+        info.dims.frames == 0 || info.samples_per_pixel == 0) {
+            return nova::err(std::string{"Invalid image dimensions"});
+        }
+
+        if(pixel_representation > 1) {
+            return nova::err(std::string{"Invalid PixelRepresentation"});
+        }
+
+        if(info.bits_stored == 0 ||
+        info.bits_stored > info.bits_allocated ||
+        info.high_bit >= info.bits_allocated ||
+        static_cast<std::uint32_t>(info.high_bit) + 1 < info.bits_stored) {
+            return nova::err(std::string{"Invalid pixel bit layout"});
+        }
+
+        if(info.bits_allocated == 8 && pixel_representation == 1) {
+            return nova::err(std::string{"Signed 8-bit samples are not supported"});
+        }
+
+        const auto photometric = resolve_photometric(photometric_value);
+
+        if(!photometric) {
+            return nova::err(photometric.error());
+        }
+
+        const auto format = resolve_pixel_sample_format(
+            info.bits_allocated,
+            pixel_representation
+        );
+
+        if(!format) {
+            return nova::err(format.error());
+        }
+
+        info.photometric = *photometric;
+        info.format = *format;
+
+        constexpr std::size_t max_decoded_bytes = 256ULL * 1024ULL * 1024ULL;
+
+        auto bytes = static_cast<std::size_t>(info.bits_allocated / 8);
+
+        for(const auto factor : std::array<std::uint32_t, 4> {
+            info.dims.width,
+            info.dims.height,
+            info.dims.frames,
+            info.samples_per_pixel
+        }) {
+            if(factor == 0 || bytes > max_decoded_bytes / factor) {
+                return nova::err(std::string{"DICOM pixel size exceeds limits"});
+            }
+
+            bytes *= factor;
+        }
 
         return info;
     }

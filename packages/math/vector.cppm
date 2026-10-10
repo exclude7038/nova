@@ -615,7 +615,8 @@ namespace nova::math {
             }
             else {
                 if constexpr (Dim == 3) {
-                    DEBUG_ASSERT(std::bit_cast<physical_array>(m_storage)[3] == 0.0f);
+                    const auto storage = std::bit_cast<physical_array>(m_storage);
+                    DEBUG_ASSERT(storage[3] == 0.0f);
                 }
                 return m_storage;
             }
