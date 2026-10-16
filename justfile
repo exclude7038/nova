@@ -334,3 +334,99 @@ bench *args:
         exit 1
     fi
 
+
+# Build and run DICOM fuzz tests in a separate ASan/UBSan build.
+#
+#   just fuzz fetch                         Fetch Conan deps, build, run all tests.
+#   just fuzz                               Run all tests (60 seconds EACH).
+#   just fuzz dicom                         Same as above.
+#   just fuzz dicom ValidImagesRoundTrip     Run one property.
+#   just fuzz dicom list                     List available properties.
+#   just fuzz dicom ReaderReuseNeverCrashes --fuzz_for=10m
+#   just fuzz dicom HostileLengthsAndSequencesNeverCrash --fuzz_for=inf
+fuzz *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    cd "{{packages}}"
+    name="all"
+    selected=false
+    fetch_deps=false
+    options=()
+
+    for arg in "$@"; do
+        case "$arg" in
+            dicom) ;;
+            fetch) fetch_deps=true ;;
+            --*) options+=("$arg") ;;
+            *)
+                if [[ "$selected" == true ]]; then
+                    echo "error: select only one fuzz property (or all/list)" >&2
+                    exit 2
+                fi
+                name="$arg"
+                selected=true
+                ;;
+        esac
+    done
+
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_.]+$ ]]; then
+        echo "error: invalid fuzz property: '$name'" >&2
+        exit 2
+    fi
+
+    if [[ "$fetch_deps" == true ]]; then
+        # Reuse the existing Conan requirements and options; do not build the renderer.
+        python3 -c 'import build; build.maybe_run_conan_fetch(build.Config.DEBUG)'
+    fi
+
+    generators="$PWD/build/Debug/generators"
+    toolchain="$generators/conan_toolchain.cmake"
+    if [[ ! -f "$toolchain" ]]; then
+        echo "error: Debug Conan dependencies are missing. Run 'just fuzz fetch'." >&2
+        exit 1
+    fi
+
+    build_dir="$PWD/build/Debug/cmake-fuzz"
+    cmake -S . -B "$build_dir" -G Ninja \
+        -DCMAKE_C_COMPILER="${CC:-/usr/bin/clang}" \
+        -DCMAKE_CXX_COMPILER="${CXX:-/usr/bin/clang++}" \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
+        -DCMAKE_PREFIX_PATH="$generators" \
+        -DNOVA_BUILD_FUZZ_TESTS=ON \
+        -DNOVA_BUILD_TESTS=OFF \
+        -DNOVA_BUILD_BENCHMARKS=OFF \
+        -DNOVA_BUILD_RENDERER=OFF \
+        -DNOVA_ENABLE_UNITY_BUILD=OFF \
+        -DNOVA_SANITIZER=asan-ubsan \
+        -DNOVA_CPU_ARCH="${NOVA_CPU_ARCH:-native}" \
+        -DNOVA_CPU_TUNE="${NOVA_CPU_TUNE:-native}"
+
+    cmake --build "$build_dir" --target nova_dicom_fuzz
+    executable="$build_dir/fuzz/dicom/nova_dicom_fuzz_reader"
+
+    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1:abort_on_error=1:detect_stack_use_after_return=1}"
+    export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}"
+
+    if [[ "$name" == list ]]; then
+        exec "$executable" --list_fuzz_tests "${options[@]}"
+    fi
+
+    corpus="${NOVA_FUZZ_CORPUS:-${XDG_CACHE_HOME:-$HOME/.cache}/nova/fuzz}"
+    mkdir -p "$corpus"
+    run_args=(
+        "--fuzz_for=${NOVA_FUZZ_DURATION:-60s}"
+        "--corpus_database=$corpus"
+        "--time_limit_per_input=10s"
+        "--rss_limit_mb=2048"
+        "--stack_limit_kb=1024"
+    )
+    if [[ "$name" != all ]]; then
+        if [[ "$name" != DicomFuzz.* ]]; then
+            name="DicomFuzz.$name"
+        fi
+        run_args+=("--fuzz=$name")
+    fi
+
+    exec "$executable" "${run_args[@]}" "${options[@]}"
