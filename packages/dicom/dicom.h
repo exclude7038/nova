@@ -2,61 +2,63 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <dcmdata/dctagkey.h>
 #include <string>
 #include <string_view>
+#include <utility>
 #include "core/result.h"
 
 namespace nova::dicom {
-    enum class dicom_tag : uint8_t {
-        patient_name,
-        patient_id,
-        patient_birth_date,
-        patient_birth_time,
-        patient_sex,
-        study_date,
-        study_time,
-        study_instance_uid,
-        study_id,
-        study_accession_number,
-        study_description,
-        study_referring_physician_name,
-        series_date,
-        series_time,
-        series_instance_uid,
-        series_description,
-        series_number,
-        series_modality,
-        series_body_part_examined,
-        series_performing_physician_name,
-        series_smallest_pixel_value,
-        series_largest_pixel_value,
-        samples_per_pixel,
-        photometric_interpretation,
-        rows,
-        columns,
-        pixel_aspect_ratio,
-        bits_allocated,
-        bits_stored,
-        high_bit,
-        pixel_representation,
-        smallest_image_pixel_value,
-        largest_image_pixel_value,
-        pixel_padding_range_limit,
-        color_space,
-        pixel_data,
-        image_type,
-        slice_thickness,
-        spacing_between_slices,
-        image_position,
-        image_orientation,
-        slice_location,
-        pixel_spacing,
-        number_of_frames,
-        planar_configuration,
-        window_center,
-        window_width,
-        rescale_intercept,
-        rescale_slope,
+    enum class dicom_tag : std::uint32_t {
+        patient_name = 0x00100010U,
+        patient_id = 0x00100020U,
+        patient_birth_date = 0x00100030U,
+        patient_birth_time = 0x00100032U,
+        patient_sex = 0x00100040U,
+        study_date = 0x00080020U,
+        study_time = 0x00080030U,
+        study_instance_uid = 0x0020000DU,
+        study_id = 0x00200010U,
+        study_accession_number = 0x00080050U,
+        study_description = 0x00081030U,
+        study_referring_physician_name = 0x00080090U,
+        series_date = 0x00080021U,
+        series_time = 0x00080031U,
+        series_instance_uid = 0x0020000EU,
+        series_description = 0x0008103EU,
+        series_number = 0x00200011U,
+        series_modality = 0x00080060U,
+        series_body_part_examined = 0x00180015U,
+        series_performing_physician_name = 0x00081050U,
+        series_smallest_pixel_value = 0x00280108U,
+        series_largest_pixel_value = 0x00280109U,
+        samples_per_pixel = 0x00280002U,
+        photometric_interpretation = 0x00280004U,
+        rows = 0x00280010U,
+        columns = 0x00280011U,
+        pixel_aspect_ratio = 0x00280034U,
+        bits_allocated = 0x00280100U,
+        bits_stored = 0x00280101U,
+        high_bit = 0x00280102U,
+        pixel_representation = 0x00280103U,
+        smallest_image_pixel_value = 0x00280106U,
+        largest_image_pixel_value = 0x00280107U,
+        pixel_padding_range_limit = 0x00280121U,
+        color_space = 0x00282002U,
+        pixel_data = 0x7FE00010U,
+        image_type = 0x00080008U,
+        slice_thickness = 0x00180050U,
+        spacing_between_slices = 0x00180088U,
+        image_position = 0x00200032U,
+        image_orientation = 0x00200037U,
+        slice_location = 0x00201041U,
+        pixel_spacing = 0x00280030U,
+        number_of_frames = 0x00280008U,
+        planar_configuration = 0x00280006U,
+        window_center = 0x00281050U,
+        window_width = 0x00281051U,
+        rescale_intercept = 0x00281052U,
+        rescale_slope = 0x00281053U,
     };
 
     enum class modality : uint8_t {
@@ -184,10 +186,29 @@ namespace nova::dicom {
         pixel_sample_format format;
 
         [[nodiscard]] std::size_t pixel_count() const noexcept {
-            return static_cast<size_t>(dims.width) * static_cast<size_t>(dims.height) * static_cast<size_t>(dims.frames);
+            return static_cast<size_t>(dims.width) * 
+                static_cast<size_t>(dims.height) *
+                static_cast<size_t>(dims.frames);
         }
     };
 
-    [[nodiscard]] dicom_tag_data resolve_dicom_tag(dicom_tag tag);
+    [[nodiscard]] constexpr dicom_tag_data resolve_dicom_tag(dicom_tag tag) noexcept {
+        const auto value = std::to_underlying(tag);
+
+        return {
+            .group = static_cast<std::uint16_t>(value >> 16),
+            .element = static_cast<std::uint16_t>(value & 0xffffU)
+        };
+    }
+
+    [[nodiscard]] constexpr DcmTagKey to_dcm_tag(dicom_tag tag) noexcept {
+        const auto value = std::to_underlying(tag);
+
+        return {
+            static_cast<std::uint16_t>(value >> 16),
+            static_cast<std::uint16_t>(value & 0xffffU)
+        };
+    }
+
     [[nodiscard]] nova::result<modality> resolve_modality(std::string_view modality);
 }

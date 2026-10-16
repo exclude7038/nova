@@ -1,6 +1,7 @@
 #include "dicom_reader.h"
 #include "core/result.h"
 #include "dicom.h"
+#include <array>
 #include <assert.hpp>
 #include <cerrno>
 #include <cstddef>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <ofstd/ofcond.h>
 #include <ofstd/oftypes.h>
+#include <quill/bundled/fmt/format.h>
 #include <span>
 #include <string>
 #include <string_view>
@@ -250,97 +252,76 @@ public:
 
             auto& elem = *static_cast<DcmElement*>(obj);
             const auto& tag = elem.getTag();
-            const auto key = (static_cast<std::uint32_t>(tag.getGroup()) << 16) | 
-                             static_cast<std::uint32_t>(tag.getElement());
+            const auto key = static_cast<dicom_tag>(
+                (static_cast<std::uint32_t>(tag.getGroup()) << 16) | 
+                static_cast<std::uint32_t>(tag.getElement())
+            );
 
              switch(key) {
-                // Patient
-                case 0x00100010:
+                case dicom_tag::patient_name:
                     assign_str(elem, result.patient.name);
                     break;
-                case 0x00100020:
+                case dicom_tag::patient_id:
                     assign_str(elem, result.patient.id);
                     break;
-
-                case 0x00100030:
+                case dicom_tag::patient_birth_date:
                     assign_str(elem, result.patient.birth_date);
                     break;
-
-                case 0x00100032:
+                case dicom_tag::patient_birth_time:
                     assign_str(elem, result.patient.birth_time);
                     break;
-
-                case 0x00100040:
+                case dicom_tag::patient_sex:
                     assign_str(elem, result.patient.sex);
                     break;
-
-                // Study
-                case 0x0020000D:
+                case dicom_tag::study_instance_uid:
                     assign_str(elem, result.study.instance_uid);
                     break;
-
-                case 0x00200010:
+                case dicom_tag::study_id:
                     assign_str(elem, result.study.id);
                     break;
-
-                case 0x00080020:
+                case dicom_tag::study_date:
                     assign_str(elem, result.study.date);
                     break;
-
-                case 0x00080030:
+                case dicom_tag::study_time:
                     assign_str(elem, result.study.time);
                     break;
-
-                case 0x00080050:
+                case dicom_tag::study_accession_number:
                     assign_str(elem, result.study.accession_number);
                     break;
-
-                case 0x00081030:
+                case dicom_tag::study_description:
                     assign_str(elem, result.study.description);
                     break;
-
-                case 0x00080090:
+                case dicom_tag::study_referring_physician_name:
                     assign_str(elem, result.study.referring_physician_name);
                     break;
-
-                // Series
-                case 0x0020000E:
+                case dicom_tag::series_instance_uid:
                     assign_str(elem, result.series.instance_uid);
                     break;
-
-                case 0x00080021:
+                case dicom_tag::series_date:
                     assign_str(elem, result.series.date);
                     break;
-
-                case 0x00080031:
+                case nova::dicom::dicom_tag::series_time:
                     assign_str(elem, result.series.time);
                     break;
-
-                case 0x0008103E:
+                case dicom_tag::series_description:
                     assign_str(elem, result.series.description);
                     break;
-
-                case 0x00200011:
+                case dicom_tag::series_number:
                     assign_str(elem, result.series.number);
                     break;
-
-                case 0x00180015:
+                case dicom_tag::series_body_part_examined:
                     assign_str(elem, result.series.body_part_examined);
                     break;
-
-                case 0x00081050:
+                case dicom_tag::series_performing_physician_name:
                     assign_str(elem, result.series.performing_physician_name);
                     break;
-
-                case 0x00280108:
+                case dicom_tag::series_smallest_pixel_value:
                     assign_numeric_str(elem, result.series.smallest_pixel_value);
                     break;
-
-                case 0x00280109:
+                case dicom_tag::series_largest_pixel_value:
                     assign_numeric_str(elem, result.series.largest_pixel_value);
                     break;
-
-                case 0x00080060: {
+                case dicom_tag::series_modality: {
                     char* value = nullptr;
 
                     if(elem.getString(value).good() && value != nullptr) {
@@ -421,10 +402,56 @@ public:
             return nova::err();
         }
 
-        const auto expected_sample_count =
-            info.pixel_count() * static_cast<std::size_t>(info.samples_per_pixel);
+        const DcmXfer transfer_syntax{dataset()->getOriginalXfer()};
+        const auto valid_transfer_syntax = transfer_syntax.usesNativeFormat() &&
+                                   !transfer_syntax.isPixelDataCompressed() &&
+                                   !transfer_syntax.isDatasetCompressed(); 
 
-        switch (info.format) {
+        if(!valid_transfer_syntax) [[unlikely]] {
+            return nova::err(std::string{"Unsupported DICOM transfer syntax"});
+        }
+
+        std::size_t bytes_per_sample{};
+        switch(info.format) {
+            case pixel_sample_format::u8:
+                bytes_per_sample = 1;
+                break;
+            case pixel_sample_format::u16:
+            case pixel_sample_format::s16:
+                bytes_per_sample = 2;
+                break;
+            case pixel_sample_format::u32:
+            case pixel_sample_format::s32:
+                bytes_per_sample = 4;
+                break;
+            default:
+                return nova::err(std::string{"Invalid pixel sample format"});
+        }
+
+        if(info.bits_allocated != bytes_per_sample * 8) [[unlikely]] {
+            return nova::err(std::string{"Inconsistent pixel bit depth"});
+        }
+
+        constexpr std::size_t max_decoded_bytes = 256ULL * 1024ULL * 1024ULL;
+        const auto max_samples = max_decoded_bytes / bytes_per_sample;
+        std::size_t expected_sample_count = 1;
+
+        const auto factors = std::array<std::size_t, 4> { 
+            info.dims.width,
+            info.dims.height,
+            info.dims.frames,
+            info.samples_per_pixel
+        };
+
+        for(const auto factor : factors) {
+            if(factor == 0 || expected_sample_count > max_samples / factor) [[unlikely]] {
+                return nova::err(std::string{"DICOM pixel dimensions exceed limits"});
+            }
+
+            expected_sample_count *= factor;
+        }
+
+        switch(info.format) {
             case pixel_sample_format::u8:
                 return read_pixel_data<pixel_sample_format::u8>(expected_sample_count);
             case pixel_sample_format::u16:
@@ -436,184 +463,115 @@ public:
             case pixel_sample_format::s32:
                 return read_pixel_data<pixel_sample_format::s32>(expected_sample_count);
             default:
-                UNREACHABLE();
-        }
+                return nova::err(std::string{"Invalid pixel sample format"});
+        }      
     }
 
-    
     [[nodiscard]] nova::result<pixel_data_info> read_pixel_data_info() const {
         if(!is_loaded()) [[unlikely]] {
             return nova::err(std::string{"No DICOM file loaded"});
         }
 
+        auto* dataset = this->dataset();
+
+        const auto read_u16 = [dataset](dicom_tag tag, std::uint16_t& value) {
+            return dataset->findAndGetUint16(to_dcm_tag(tag), value).good();
+        };
+
+        const auto read_string = [dataset](dicom_tag tag, OFString& value) {
+            return dataset->findAndGetOFString(to_dcm_tag(tag), value).good() && !value.empty();
+        };
+
         pixel_data_info info{};
+
+        std::uint16_t rows{};
+        std::uint16_t columns{};
+        std::uint16_t pixel_representation{};
+        OFString photometric_value;
+
+        const bool valid_attributes =
+            read_u16(dicom_tag::rows, rows) &&
+            read_u16(dicom_tag::columns, columns) &&
+            read_u16(dicom_tag::samples_per_pixel, info.samples_per_pixel) &&
+            read_u16(dicom_tag::bits_allocated, info.bits_allocated) &&
+            read_u16(dicom_tag::bits_stored, info.bits_stored) &&
+            read_u16(dicom_tag::high_bit, info.high_bit) &&
+            read_u16(dicom_tag::pixel_representation, pixel_representation) &&
+            read_string(dicom_tag::photometric_interpretation, photometric_value);
+
+        if(!valid_attributes) [[unlikely]] {
+            return nova::err(std::string{"Missing or invalid required DICOM image attributes"});
+        }
+
+        info.dims.width = columns;
+        info.dims.height = rows;
         info.dims.frames = 1;
 
-        std::uint16_t pixel_representation{};
-        std::string_view photometric_value{};
+        if(dataset->tagExists(to_dcm_tag(dicom_tag::number_of_frames))) {
+            OFString value;
 
-        bool has_rows = false;
-        bool has_columns = false;
-        bool has_samples = false;
-        bool has_bits = false;
-        bool has_representation = false;
-        bool has_photometric = false;
-
-        const auto get_uint16 = [](DcmElement& element, std::uint16_t& value) noexcept {
-            return element.getUint16(value).good();
-        };
-
-        const auto get_string = [](DcmElement& element, std::string_view& value) noexcept {
-            char* data = nullptr;
-            Uint32 length = 0;
-
-            if(element.getString(data, length).bad() || data == nullptr) {
-                return false;
+            if(!read_string(dicom_tag::number_of_frames, value)) [[unlikely]] {
+                return nova::err(std::string{"Invalid number of frames"});
             }
 
-            value = std::string_view{data, length};
+            std::string_view frames{value.data(), value.size()};
 
-            while(!value.empty() && (value.front() == ' ' || value.front() == '\0')) {
-                value.remove_prefix(1);
-            }
-
-            while(!value.empty() && (value.back() == ' ' || value.back() == '\0')) {
-                value.remove_suffix(1);
-            }
-
-            return !value.empty();
-        };
-
-        const auto get_frames = [&](DcmElement& element, std::uint32_t& frames) noexcept {
-            std::string_view value;
-
-            if(!get_string(element, value)) {
-                return false;
-            }
-
-            if(value.starts_with('+')) {
-                value.remove_prefix(1);
+            if(frames.starts_with('+')) {
+                frames.remove_prefix(1);
             }
 
             const auto [ptr, error] = std::from_chars(
-                value.data(),
-                value.data() + value.size(),
-                frames
+                frames.data(),
+                frames.data() + frames.size(),
+                info.dims.frames
             );
 
-            return error == std::errc{} && ptr == value.data() + value.size() && frames > 0;
-        };
-
-        auto* dataset = this->dataset();
-
-        for(auto* obj = dataset->nextInContainer(nullptr); obj != nullptr; obj = dataset->nextInContainer(obj)) {
-            if(!obj->isElement()) {
-                continue;
-            }
-
-            auto& element = *static_cast<DcmElement*>(obj);
-            const auto& tag = element.getTag();
-
-            const auto key =
-                (static_cast<std::uint32_t>(tag.getGroup()) << 16) |
-                static_cast<std::uint32_t>(tag.getElement());
-
-            switch(key) {
-                case 0x00280002:
-                    has_samples = get_uint16(element, info.samples_per_pixel);
-                    break;
-
-                case 0x00280004:
-                    has_photometric = get_string(element, photometric_value);
-                    break;
-
-                case 0x00280006:
-                    if(!get_uint16(element, info.planar_configuration)) {
-                        return nova::err(std::string{"Invalid PlanarConfiguration"});
-                    }
-                    break;
-
-                case 0x00280008:
-                    if(!get_frames(element, info.dims.frames)) {
-                        return nova::err(std::string{"Invalid NumberOfFrames"});
-                    }
-                    break;
-
-                case 0x00280010: {
-                    std::uint16_t value{};
-                    has_rows = get_uint16(element, value);
-                    info.dims.height = value;
-                    break;
-                }
-
-                case 0x00280011: {
-                    std::uint16_t value{};
-                    has_columns = get_uint16(element, value);
-                    info.dims.width = value;
-                    break;
-                }
-
-                case 0x00280100:
-                    has_bits = get_uint16(element, info.bits_allocated);
-                    break;
-
-                case 0x00280101:
-                    if(!get_uint16(element, info.bits_stored)) {
-                        return nova::err(std::string{"Invalid BitsStored"});
-                    }
-                    break;
-
-                case 0x00280102:
-                    if(!get_uint16(element, info.high_bit)) {
-                        return nova::err(std::string{"Invalid HighBit"});
-                    }
-                    break;
-
-                case 0x00280103:
-                    has_representation = get_uint16(element, pixel_representation);
-                    break;
-
-                default:
-                    break;
+            if(error != std::errc{} || ptr != frames.data() + frames.size() || info.dims.frames == 0) [[unlikely]] {
+                return nova::err(std::string{"Invalid number of frames"});
             }
         }
 
-        if(!has_rows || !has_columns || !has_samples || !has_bits || !has_representation || !has_photometric) {
-            return nova::err(std::string{"Missing required DICOM image attributes"});
+        if(info.samples_per_pixel > 1) {
+            if(!read_u16(dicom_tag::planar_configuration, info.planar_configuration) || 
+                info.planar_configuration > 1) [[unlikely]]
+            {
+                return nova::err(std::string{"Invalid planar configuration"});
+            }
         }
 
-        if(info.dims.width == 0 || info.dims.height == 0 ||
-        info.dims.frames == 0 || info.samples_per_pixel == 0) {
+        if(info.dims.width == 0 || info.dims.height == 0 || info.samples_per_pixel == 0) [[unlikely]] {
             return nova::err(std::string{"Invalid image dimensions"});
         }
 
-        if(pixel_representation > 1) {
-            return nova::err(std::string{"Invalid PixelRepresentation"});
+        if(pixel_representation > 1) [[unlikely]] {
+            return nova::err(std::string{"Invalid pixel representation"});
         }
 
-        if(info.bits_stored == 0 ||
-        info.bits_stored > info.bits_allocated ||
-        info.high_bit >= info.bits_allocated ||
-        static_cast<std::uint32_t>(info.high_bit) + 1 < info.bits_stored) {
+        if(info.bits_allocated != 8 && info.bits_allocated != 16) [[unlikely]] {
+            return nova::err(std::string{"Unsupported bits allocated"});
+        }
+
+        if(info.bits_stored == 0 || info.bits_stored > info.bits_allocated ||
+           static_cast<std::uint32_t>(info.high_bit) + 1 != info.bits_stored) [[unlikely]] 
+        {
             return nova::err(std::string{"Invalid pixel bit layout"});
         }
 
-        if(info.bits_allocated == 8 && pixel_representation == 1) {
+        if(info.bits_allocated == 8 && pixel_representation == 1) [[unlikely]] {
             return nova::err(std::string{"Signed 8-bit samples are not supported"});
         }
 
-        const auto photometric = resolve_photometric(photometric_value);
+        const auto photometric = resolve_photometric(
+            std::string_view{photometric_value.data(), photometric_value.size()}
+        );
 
-        if(!photometric) {
+        if(!photometric) [[unlikely]] {
             return nova::err(photometric.error());
         }
 
-        const auto format = resolve_pixel_sample_format(
-            info.bits_allocated,
-            pixel_representation
-        );
+        const auto format = resolve_pixel_sample_format(info.bits_allocated, pixel_representation);
 
-        if(!format) {
+        if(!format) [[unlikely]] {
             return nova::err(format.error());
         }
 
@@ -623,23 +581,21 @@ public:
         constexpr std::size_t max_decoded_bytes = 256ULL * 1024ULL * 1024ULL;
 
         auto bytes = static_cast<std::size_t>(info.bits_allocated / 8);
-
-        for(const auto factor : std::array<std::uint32_t, 4> {
+        const auto factors = std::array<std::size_t, 4> {
             info.dims.width,
             info.dims.height,
             info.dims.frames,
             info.samples_per_pixel
-        }) {
-            if(factor == 0 || bytes > max_decoded_bytes / factor) {
+        };
+
+        for(const auto factor : factors) {
+            if(factor == 0 || bytes > max_decoded_bytes / factor) [[unlikely]] {
                 return nova::err(std::string{"DICOM pixel size exceeds limits"});
             }
-
             bytes *= factor;
         }
-
         return info;
     }
-
     void clear() noexcept {
         m_file.reset();
         m_file_path.clear();
@@ -664,8 +620,13 @@ private:
             const auto[group, element] = resolve_dicom_tag(tag);
             const auto status = dataset->findAndGetString({group, element}, value);
 
+            const auto key = std::to_underlying(tag);
             if(status.bad() || value == nullptr) {
-                nova::logger::warn("Failed to read tag {}", magic_enum::enum_name(tag));
+                nova::logger::warn(
+                    "Failed to read tag ({:04X},{:04X})",
+                    key >> 16u,
+                    key & 0xffffu
+                );
                 return default_value;
             }
             return value;
@@ -675,8 +636,13 @@ private:
             const auto[group, element] = resolve_dicom_tag(tag);
             const auto status = dataset->findAndGetUint16({group, element}, value);
 
+            const auto key = std::to_underlying(tag);
             if(status.bad()) {
-                nova::logger::warn("Failed to read tag {}", magic_enum::enum_name(tag));
+                nova::logger::warn(
+                    "Failed to read tag ({:04X},{:04X})",
+                    key >> 16u,
+                    key & 0xffffu
+                );
                 return default_value;
             }
             return value;
@@ -686,8 +652,13 @@ private:
             const auto[group, element] = resolve_dicom_tag(tag);
             const auto status = dataset->findAndGetSint16({group, element}, value);
 
+            const auto key = std::to_underlying(tag);
             if(status.bad()) {
-                nova::logger::warn("Failed to read tag {}", magic_enum::enum_name(tag));
+                nova::logger::warn(
+                    "Failed to read tag ({:04X},{:04X})",
+                    key >> 16u,
+                    key & 0xffffu
+                );
                 return default_value;
             }
             return value;
@@ -696,9 +667,14 @@ private:
             uint32_t value{};
             const auto[group, element] = resolve_dicom_tag(tag);
             const auto status = dataset->findAndGetUint32({group, element}, value);
-
+            
+            const auto key = std::to_underlying(tag);
             if(status.bad()) {
-                nova::logger::warn("Failed to read tag {}", magic_enum::enum_name(tag));
+                nova::logger::warn(
+                    "Failed to read tag ({:04X},{:04X})",
+                    key >> 16u,
+                    key & 0xffffu
+                );
                 return default_value;
             }
             return value;
@@ -708,8 +684,13 @@ private:
             const auto[group, element] = resolve_dicom_tag(tag);
             const auto status = dataset->findAndGetSint32({group, element}, value);
 
-            if(status.bad()) {
-                nova::logger::warn("Failed to read tag {}", magic_enum::enum_name(tag));
+            const auto key = std::to_underlying(tag);
+            if(status.bad()) { 
+                nova::logger::warn(
+                    "Failed to read tag ({:04X},{:04X})",
+                    key >> 16u,
+                    key & 0xffffu
+                );
                 return default_value;
             }
             return value;
