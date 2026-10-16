@@ -12,6 +12,7 @@ option(NOVA_BUILD_TESTS "Build Nova tests" ON)
 option(NOVA_USE_BUILD_CACHE "Use compiler cache" OFF)
 option(NOVA_ENABLE_UNITY_BUILD "Enable CMake unity builds" ON)
 option(NOVA_BUILD_BENCHMARKS "Build Nova benchmarks" OFF)
+option(NOVA_BUILD_FUZZ_TESTS "Build Nova fuzz tests" OFF)
 
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
@@ -30,6 +31,10 @@ include(Cache)
 include(Target)
 
 nova_enable_build_cache()
+
+if(NOVA_BUILD_FUZZ_TESTS)
+    include(FuzzTest)
+endif()
 
 add_subdirectory(core)
 add_subdirectory(logging)

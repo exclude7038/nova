@@ -73,3 +73,13 @@ If:
 
 Diagnostics:
   MissingIncludes: None
+
+---
+If:
+  PathMatch: packages/dicom/fuzz/.*
+
+CompileFlags:
+  CompilationDatabase: packages/build/Debug/cmake-fuzz
+  Add:
+    - -idirafter
+    - /usr/lib/clang/23/include

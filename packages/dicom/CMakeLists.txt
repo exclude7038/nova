@@ -8,7 +8,7 @@ target_include_directories(nova_dicom
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_compile_features(nova_dicom PUBLIC cxx_std_23)
+target_compile_features(nova_dicom PUBLIC cxx_std_26)
 nova_enable_unity_build(nova_dicom)
 
 find_package(quill REQUIRED)
@@ -34,4 +34,8 @@ endif()
 
 if(NOVA_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif()
+
+if(NOVA_BUILD_FUZZ_TESTS)
+    add_subdirectory(fuzz)
 endif()
