@@ -6,6 +6,7 @@
 #include <ios>
 #include <tuple>
 #include <vector>
+#include <dcmtk/oflog/oflog.h>
 
 namespace nova::dicom::fuzz {
     namespace {
@@ -72,6 +73,12 @@ namespace nova::dicom::fuzz {
         }
 
         void exercise(const std::string& input) {
+            static const bool quiet_dcmtk = [] {
+                OFLog::configure(OFLogger::OFF_LOG_LEVEL);
+                return true;
+            }();
+            (void)quiet_dcmtk;
+
             temporary_file file;
             ASSERT_FALSE(file.path().empty());
             ASSERT_TRUE(file.reset(input));
@@ -80,7 +87,7 @@ namespace nova::dicom::fuzz {
                 EXPECT_FALSE(reader.read_pixel_data_info().has_value());
                 return;
             }
-            (void)reader.read_metadata();
+            auto _ = reader.read_metadata();
             const auto info = reader.read_pixel_data_info();
             if(info) {
                 check_pixels(reader, *info);
@@ -375,7 +382,8 @@ namespace nova::dicom::fuzz {
 
         FUZZ_TEST(DicomFuzz, ValidImagesRoundTrip)
             .WithDomains(fuzztest::InRange<std::uint16_t>(1, 64), fuzztest::InRange<std::uint16_t>(1, 64),
-                         fuzztest::InRange<std::uint32_t>(1, 4), fuzztest::Arbitrary<bool>(), fuzztest::Arbitrary<bool>(),
+                         fuzztest::InRange<std::uint32_t>(1, 4), 
+                         fuzztest::Arbitrary<bool>(), fuzztest::Arbitrary<bool>(),
                          fuzztest::Arbitrary<std::uint8_t>(), fuzztest::Arbitrary<std::uint32_t>())
             .WithSeeds({{1, 1, 1, false, false, 7, 0}, {8, 8, 1, true, false, 15, 1},
                         {64, 64, 4, true, true, 11, 0xffffffffU}});
@@ -400,7 +408,7 @@ namespace nova::dicom::fuzz {
 
         FUZZ_TEST(DicomFuzz, HostileLengthsAndSequencesNeverCrash)
             .WithDomains(fuzztest::OneOf(fuzztest::Arbitrary<std::uint32_t>(),
-                             fuzztest::ElementOf<std::uint32_t>({0, 1, 2, 0x7fffffffU, 0xfffffffeU, 0xffffffffU})),
+                         fuzztest::ElementOf<std::uint32_t>({0, 1, 2, 0x7fffffffU, 0xfffffffeU, 0xffffffffU})),
                          fuzztest::InRange<std::uint8_t>(0, 64), fuzztest::Arbitrary<bool>(),
                          fuzztest::Arbitrary<bool>(), fuzztest::Arbitrary<std::string>().WithMaxSize(4096))
             .WithSeeds({{0xffffffffU, 0, false, false, ""}, {0xfffffffeU, 32, true, true, ""},

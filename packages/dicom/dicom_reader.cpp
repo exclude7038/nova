@@ -74,16 +74,6 @@ namespace {
         using Type = int16_t;
     };
 
-    template<>
-    struct format_type_mapper<pixel_sample_format::u32> {
-        using Type = uint32_t;
-    };
-
-    template<>
-    struct format_type_mapper<pixel_sample_format::s32> {
-        using Type = int32_t;
-    };
-
     template<pixel_sample_format Format>
     using format_type_mapper_t = format_type_mapper<Format>::Type;
 
@@ -228,21 +218,20 @@ public:
 
         metadata result{};
 
+        constexpr std::size_t max_metadata_value_length = 4096;
         const auto assign_str = [](DcmElement& elem, std::string& target) {
-            char* value = nullptr;
-
-            if(elem.getString(value).good() && value != nullptr) {
-                target.assign(value);
+             if(elem.getLength() > max_metadata_value_length) [[unlikely]] {
+                return;
             }
-        };
 
-        const auto assign_numeric_str = [](DcmElement& elem, std::string& target) {
             OFString value;
 
-            if(elem.getOFString(value, 0).good()) {
+            if(elem.getOFString(value, 0).good() && value.size() <= max_metadata_value_length) {
                 target.assign(value.data(), value.size());
             }
         };
+
+        const auto assign_numeric_str = assign_str;
 
         auto* dataset = this->dataset();
         for(auto* obj = dataset->nextInContainer(nullptr); obj != nullptr; obj = dataset->nextInContainer(obj)) {
@@ -368,28 +357,48 @@ public:
                 return nova::err();
             }
 
-            if (static_cast<std::size_t>(count) < expected_sample_count) {
-                nova::logger::error("pixel data shorter than expected");
-                return nova::err();
+            const auto padded_count = expected_sample_count + (std::is_same_v<U, std::uint8_t> 
+                ? (expected_sample_count & 1U) 
+                : 0U);
+
+            if(static_cast<std::size_t>(count) != padded_count) [[unlikely]] {
+                return nova::err(std::string{"DICOM pixel data length does not match image dimensions"});
             }
 
             return std::as_bytes(std::span<const  U>{src, expected_sample_count});
         };
 
         if constexpr (std::is_same_v<T, std::uint8_t>) {
-            return read_array(&DcmItem::findAndGetUint8Array);
+            const auto buffer = read_array(&DcmItem::findAndGetUint8Array);
+            if(buffer) {
+                return buffer;
+            }
+
+             // 8 bit pixels may also be stored using OW.
+             const std::uint16_t* words = nullptr;
+            unsigned long count = 0;
+
+            const auto status = dataset->findAndGetUint16Array(
+                DCM_PixelData,
+                words,
+                &count,
+                OFFalse
+            );
+
+            if(status.bad() || words == nullptr) [[unlikely]] {
+                return nova::err(std::string{"Cannot access DICOM pixel data"});
+            }
+
+            const auto padded_bytes = expected_sample_count + (expected_sample_count & 1U);
+
+            if(static_cast<std::size_t>(count) != padded_bytes / sizeof(std::uint16_t)) [[unlikely]] {
+                return nova::err(std::string{"Invalid OW pixel data length"});
+            }
+
+            return std::as_bytes(std::span<const std::uint16_t>{words, count}).first(expected_sample_count);
         }
-        else if constexpr (std::is_same_v<T, std::uint16_t>) {
+        else if constexpr(std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::int16_t>) {
             return read_array(&DcmItem::findAndGetUint16Array);
-        }
-        else if constexpr (std::is_same_v<T, std::int16_t>) {
-            return read_array(&DcmItem::findAndGetUint16Array);
-        }
-        else if constexpr (std::is_same_v<T, std::uint32_t>) {
-            return read_array(&DcmItem::findAndGetUint32Array);
-        }
-        else if constexpr (std::is_same_v<T, std::int32_t>) {
-            return read_array(&DcmItem::findAndGetSint32Array);
         }
         else {
             UNREACHABLE();
@@ -458,10 +467,6 @@ public:
                 return read_pixel_data<pixel_sample_format::u16>(expected_sample_count);
             case pixel_sample_format::s16:
                 return read_pixel_data<pixel_sample_format::s16>(expected_sample_count);
-            case pixel_sample_format::u32:
-                return read_pixel_data<pixel_sample_format::u32>(expected_sample_count);
-            case pixel_sample_format::s32:
-                return read_pixel_data<pixel_sample_format::s32>(expected_sample_count);
             default:
                 return nova::err(std::string{"Invalid pixel sample format"});
         }      
@@ -735,17 +740,8 @@ private:
         if constexpr (std::is_same_v<T, uint8_t>) {
             return pixel_reader_lambda(&DcmItem::findAndGetUint8Array);
         }
-        else if constexpr (std::is_same_v<T, uint16_t>) {
+        else if constexpr (std::is_same_v<T, uint16_t> || std::is_same_v<T, int16_t>) {
             return pixel_reader_lambda(&DcmItem::findAndGetUint16Array);
-        }
-        else if constexpr (std::is_same_v<T, int16_t>) {
-            return pixel_reader_lambda(&DcmItem::findAndGetUint16Array);
-        }
-        else if constexpr (std::is_same_v<T, uint32_t>) {
-            return pixel_reader_lambda(&DcmItem::findAndGetUint32Array);
-        }
-        else if constexpr (std::is_same_v<T, int32_t>) {
-            return pixel_reader_lambda(&DcmItem::findAndGetSint32Array);
         }
         else {
             UNREACHABLE();
