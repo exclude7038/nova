@@ -65,6 +65,7 @@ target_compile_options(
         -fstrict-flex-arrays=3
 
         -U_FORTIFY_SOURCE
+        -fcoro-aligned-allocation
 )
 
 if(NOVA_SANITIZER STREQUAL "none")
