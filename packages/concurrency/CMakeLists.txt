@@ -27,6 +27,7 @@ target_sources(nova_concurrency
     coros/scheduler_work.cppm
     coros/task.cppm
     coros/algorithms.cppm
+    coros/parallel_foreach.cppm
 )
 
 target_compile_features(nova_concurrency PUBLIC cxx_std_23)

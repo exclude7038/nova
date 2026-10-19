@@ -14,6 +14,7 @@ module;
 export module coro_algorithms;
 
 export import coro_task;
+export import coro_parallel_foreach;
 import scheduler_work;
 
 namespace nova::coro {

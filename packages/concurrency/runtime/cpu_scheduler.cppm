@@ -789,6 +789,10 @@ namespace nova {
             return m_config.worker_count;
         }
 
+        [[nodiscard]] static cpu_scheduler* current() noexcept {
+            return tls_scheduler;
+        }
+
         [[nodiscard]] std::size_t pending() const noexcept {
             return static_cast<std::size_t>(m_work_state.load(std::memory_order::acquire) & count_mask);
         }
